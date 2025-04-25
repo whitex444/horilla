@@ -7,6 +7,7 @@ import contextlib
 import json
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from io import BytesIO
 from urllib.parse import parse_qs, unquote
 
 import pandas as pd
@@ -22,6 +23,7 @@ from django.utils.encoding import force_str
 from django.utils.translation import gettext as __
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.http import require_http_methods
+from xhtml2pdf import pisa
 
 from base.filters import PenaltyFilter
 from base.forms import PenaltyAccountForm
@@ -414,6 +416,8 @@ def leave_request_creation(request, type_id=None, emp_id=None):
     form = choosesubordinates(request, form, "leave.add_leaverequest")
     if request.method == "POST":
         form = LeaveRequestCreationForm(request.POST, request.FILES)
+        # Set the queryset again on the bound form for the validation
+        form.fields["leave_type_id"].queryset = assigned_leave_types
         form = choosesubordinates(request, form, "leave.add_leaverequest")
         if form.is_valid():
             leave_request = form.save(commit=False)
@@ -621,6 +625,143 @@ def leave_requests_export(request):
         file_name="Leave_requests",
         perm="leave.view_leaverequest",
     )
+
+
+def generate_leave_request_pdf(template_path, context, html=False):
+    """
+    Generate a PDF file from an HTML template and context data.
+
+    Args:
+        template_path (str): The path to the HTML template.
+        context (dict): The context data to render the template.
+        html (bool): If True, return raw HTML instead of a PDF.
+
+    Returns:
+        HttpResponse: A response with the generated PDF file or raw HTML.
+    """
+    try:
+        html_content = render_to_string(template_path, context)
+
+        if html:
+            return HttpResponse(html_content)
+
+        result = BytesIO()
+        pdf_status = pisa.CreatePDF(src=html_content, dest=result)
+
+        if pdf_status.err:
+            logger.error("Error creating PDF")
+            return HttpResponse("Error generating PDF", status=500)
+
+        response = HttpResponse(result.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = 'inline; filename="leave_request.pdf"'
+        return response
+
+    except Exception as e:
+        logger.exception("Error generating PDF")
+        return HttpResponse(f"Error generating PDF: {str(e)}", status=500)
+
+
+@login_required
+@manager_can_enter("leave.view_leaverequest")
+def create_leave_report(request):
+    """
+    Generate a Leave Report as a PDF and return it in an HttpResponse.
+
+    Args:
+        request (HttpRequest): The request object.
+
+    Returns:
+        HttpResponse: A response containing the PDF content.
+    """
+    employee_data = {}
+    company_id = request.session.get("selected_company")
+    if company_id == "all" or not company_id:
+        company = Company.objects.all()
+    else:
+        company = Company.objects.filter(id=company_id).first()
+
+    leave_requests = LeaveRequest.objects.filter(status="approved").select_related(
+        "employee_id", "leave_type_id"
+    )
+    used_days_map = defaultdict(float)
+    leave_request_map = defaultdict(list)
+
+    for lreq in leave_requests:
+        key = (
+            lreq.employee_id.id,
+            lreq.leave_type_id.id if lreq.leave_type_id else None,
+        )
+        used_days_map[key] += lreq.requested_days
+        leave_request_map[lreq.employee_id.id].append(lreq)
+
+    employees = Employee.objects.all()
+
+    for employee in employees:
+        employee_id = employee.id
+        emp_data = {
+            "employee": employee,
+            "total_leave_days": 0,
+            "used_leave_days": 0,
+            "remaining_leave_days": 0,
+            "leave_requests": leave_request_map.get(employee_id, []),
+            "leave_types_counted": set(),
+            "new_hire": False,
+        }
+
+        if employee.employee_work_info:
+            hire_date = employee.employee_work_info.date_joining
+            if hire_date and (date.today() - hire_date) <= timedelta(days=365):
+                emp_data["new_hire"] = True
+
+        assigned_leave_types = LeaveType.objects.filter(
+            id__in=employee.available_leave.values_list("leave_type_id", flat=True)
+        )
+
+        for leave_type in assigned_leave_types:
+            leave_type_id = leave_type.id
+
+            if leave_type_id in emp_data["leave_types_counted"]:
+                continue
+
+            emp_data["leave_types_counted"].add(leave_type_id)
+
+            total_days = leave_type.total_days or 0
+            emp_data["total_leave_days"] += total_days
+
+            used_days = used_days_map.get((employee_id, leave_type_id), 0)
+            emp_data["used_leave_days"] += used_days
+
+        emp_data["remaining_leave_days"] = (
+            emp_data["total_leave_days"] - emp_data["used_leave_days"]
+        )
+
+        sorted_reqs = sorted(
+            emp_data["leave_requests"],
+            key=lambda x: (x.end_date - x.start_date).days,
+            reverse=True,
+        )
+        for i in range(3):
+            if i < len(sorted_reqs):
+                emp_data[f"period{i+1}_start"] = sorted_reqs[i].start_date
+                emp_data[f"period{i+1}_end"] = sorted_reqs[i].end_date
+            else:
+                emp_data[f"period{i+1}_start"] = ""
+                emp_data[f"period{i+1}_end"] = ""
+
+        employee_data[employee_id] = emp_data
+
+    final_employee_data = list(employee_data.values())
+    final_employee_data.sort(key=lambda x: x["employee"].get_full_name())
+
+    context = {
+        "employee_data": final_employee_data,
+        "company_data": company,
+        "report_creation_date": date.today(),
+        "request": request,
+    }
+
+    template_path = "leave/leave_request/leave_request_pdf.html"
+    return generate_leave_request_pdf(template_path, context=context, html=False)
 
 
 @login_required
@@ -1666,6 +1807,8 @@ def assign_leave_type_import(request):
         "Badge ID Error": [],
         "Leave Type Error": [],
         "Assigned Error": [],
+        "Available Days": [],
+        "Carry Forward Days": [],
         "Other Errors": [],
     }
 
@@ -1675,7 +1818,9 @@ def assign_leave_type_import(request):
         assign_leave_dicts = data_frame.to_dict("records")
 
         # Pre-fetch all employees and leave types
-        employees = {emp.badge_id.lower(): emp for emp in Employee.objects.all()}
+        employees = {
+            emp.badge_id.lower(): emp for emp in Employee.objects.all() if emp.badge_id
+        }
         leave_types = {lt.name.lower(): lt for lt in LeaveType.objects.all()}
         available_leaves = {
             (al.leave_type_id.id, al.employee_id.id): al
@@ -1688,6 +1833,8 @@ def assign_leave_type_import(request):
         for assign_leave in assign_leave_dicts:
             badge_id = assign_leave.get("Employee Badge ID", "").strip().lower()
             assign_leave_type = assign_leave.get("Leave Type", "").strip().lower()
+            available_days = assign_leave.get("Available Days", "0")
+            cfd = assign_leave.get("Carry Forward Days", "0")
             employee = employees.get(badge_id)
             leave_type = leave_types.get(assign_leave_type)
 
@@ -1712,13 +1859,26 @@ def assign_leave_type_import(request):
                 continue
 
             # If no errors, create the AvailableLeave instance
-            assign_leave_list.append(
-                AvailableLeave(
-                    leave_type_id=leave_type,
-                    employee_id=employee,
-                    available_days=leave_type.total_days,
-                )
+            if available_days == 0:
+                available_days = leave_type.total_days
+
+            available_leave = AvailableLeave(
+                leave_type_id=leave_type,
+                employee_id=employee,
+                available_days=available_days,
             )
+            if cfd:
+                available_leave.carryforward_days = cfd
+                available_leave.expired_date = leave_type.carryforward_expire_date
+                try:
+                    available_leave.reset_date = leave_type.leave_type_next_reset_date()
+                except:
+                    pass
+                available_leave.assigned_date = datetime.today()
+                available_leave.total_leave_days = (
+                    available_leave.carryforward_days + available_leave.available_days
+                )
+            assign_leave_list.append(available_leave)
 
         # Bulk create available leaves
         if assign_leave_list:

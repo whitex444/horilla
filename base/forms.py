@@ -245,8 +245,12 @@ class ModelForm(forms.ModelForm):
                 pass
 
             try:
-                self.fields["company_id"].initial = (
-                    request.user.employee_get.get_company
+                company_field = self.fields["company_id"]
+                company = request.user.employee_get.get_company
+                company_queryset = company_field.queryset
+
+                company_field.initial = (
+                    company if company in company_queryset else company_queryset.first()
                 )
             except:
                 pass
@@ -2409,6 +2413,18 @@ class AnnouncementForm(ModelForm):
     def as_p(self, *args, **kwargs):
         context = {"form": self}
         return render_to_string("announcement/as_p.html", context)
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if isinstance(self.fields["employees"], HorillaMultiSelectField):
+            self.errors.pop("employees", None)
+
+            employee_data = self.fields["employees"].queryset.filter(
+                id__in=self.data.getlist("employees")
+            )
+            cleaned_data["employees"] = employee_data
+
+        return cleaned_data
 
 
 class AnnouncementCommentForm(ModelForm):

@@ -178,6 +178,17 @@ class Employee(models.Model):
         """
         return getattr(getattr(self, "employee_work_info", None), "shift_id", None)
 
+    def get_shift_schedule(self):
+        """
+        This method is used to check if the employee has a shift assigned
+        """
+        shift = self.get_shift()
+        day = datetime.today().strftime("%A").lower()
+        if not shift:
+            return None
+        schedule = shift.employeeshiftschedule_set.filter(day__day=day).first()
+        return schedule if schedule else None
+
     def get_mail(self):
         """
         This method is used to return the shift of the employee
@@ -562,13 +573,6 @@ class EmployeeWorkInformation(models.Model):
         related_name="employee_work_info",
         verbose_name=_("Employee"),
     )
-    job_position_id = models.ForeignKey(
-        JobPosition,
-        on_delete=models.PROTECT,
-        null=True,
-        blank=True,
-        verbose_name=_("Job Position"),
-    )
     department_id = models.ForeignKey(
         Department,
         on_delete=models.PROTECT,
@@ -576,19 +580,12 @@ class EmployeeWorkInformation(models.Model):
         blank=True,
         verbose_name=_("Department"),
     )
-    work_type_id = models.ForeignKey(
-        WorkType,
+    job_position_id = models.ForeignKey(
+        JobPosition,
         on_delete=models.PROTECT,
         null=True,
         blank=True,
-        verbose_name=_("Work Type"),
-    )
-    employee_type_id = models.ForeignKey(
-        EmployeeType,
-        on_delete=models.PROTECT,
-        null=True,
-        blank=True,
-        verbose_name=_("Employee Type"),
+        verbose_name=_("Job Position"),
     )
     job_role_id = models.ForeignKey(
         JobRole,
@@ -605,27 +602,6 @@ class EmployeeWorkInformation(models.Model):
         related_name="reporting_manager",
         verbose_name=_("Reporting Manager"),
     )
-    company_id = models.ForeignKey(
-        Company,
-        on_delete=models.PROTECT,
-        blank=True,
-        null=True,
-        verbose_name=_("Company"),
-    )
-    tags = models.ManyToManyField(
-        EmployeeTag, blank=True, verbose_name=_("Employee tag")
-    )
-    location = models.CharField(
-        max_length=50, null=True, blank=True, verbose_name=_("Work Location")
-    )
-    email = models.EmailField(
-        max_length=254, blank=True, null=True, verbose_name=_("Email")
-    )
-    mobile = models.CharField(
-        max_length=254,
-        blank=True,
-        null=True,
-    )
     shift_id = models.ForeignKey(
         EmployeeShift,
         on_delete=models.DO_NOTHING,
@@ -633,10 +609,47 @@ class EmployeeWorkInformation(models.Model):
         blank=True,
         verbose_name=_("Shift"),
     )
+    work_type_id = models.ForeignKey(
+        WorkType,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        verbose_name=_("Work Type"),
+    )
+
+    employee_type_id = models.ForeignKey(
+        EmployeeType,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        verbose_name=_("Employee Type"),
+    )
+    tags = models.ManyToManyField(
+        EmployeeTag, blank=True, verbose_name=_("Employee tag")
+    )
+    location = models.CharField(
+        max_length=50, null=True, blank=True, verbose_name=_("Work Location")
+    )
+    company_id = models.ForeignKey(
+        Company,
+        on_delete=models.PROTECT,
+        blank=True,
+        null=True,
+        verbose_name=_("Company"),
+    )
+    email = models.EmailField(
+        max_length=254, blank=True, null=True, verbose_name=_("Work Email")
+    )
+    mobile = models.CharField(
+        max_length=254, blank=True, null=True, verbose_name=_("Work Phone")
+    )
+
     date_joining = models.DateField(
         null=True, blank=True, verbose_name=_("Joining Date")
     )
-    contract_end_date = models.DateField(blank=True, null=True)
+    contract_end_date = models.DateField(
+        blank=True, null=True, verbose_name=_("Contract End Date")
+    )
     basic_salary = models.IntegerField(
         null=True, blank=True, default=0, verbose_name=_("Basic Salary")
     )

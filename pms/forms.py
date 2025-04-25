@@ -726,21 +726,51 @@ class FeedbackForm(HorillaModelForm):
         )
         self.fields["employee_id"].widget.attrs["onchange"] = "get_collegues($(this))"
 
-        # Horilla multi-select filter for subordinates
-        self.fields["subordinate_id"] = HorillaMultiSelectField(
-            queryset=Employee.objects.all(),
-            widget=HorillaMultiSelectWidget(
-                filter_route_name="employee-widget-filter",
-                filter_class=EmployeeFilter,
-                filter_instance_contex_name="f",
-                filter_template_path="employee_filters.html",
-                instance=self.instance,
-                required=False,
-            ),
-            label=_("Subordinates"),
-        )
-
         reload_queryset(self.fields)
+
+        if self.instance and self.instance.pk:
+            employee = self.instance.employee_id
+            reporting_manager = (
+                getattr(employee.employee_work_info, "reporting_manager_id", None)
+                if employee
+                and hasattr(employee, "employee_work_info")
+                and employee.employee_work_info
+                else None
+            )
+            subordinates = Employee.objects.filter(
+                is_active=True, employee_work_info__reporting_manager_id=employee
+            )
+            department = employee.get_department()
+
+            exclude_ids = [employee.id]
+            if reporting_manager:
+                exclude_ids.append(reporting_manager.id)
+
+            colleagues = Employee.objects.filter(
+                is_active=True, employee_work_info__department_id=department
+            ).exclude(id__in=exclude_ids)
+
+            self.fields["colleague_id"].queryset = colleagues
+            self.fields["subordinate_id"].queryset = subordinates
+            self.fields["manager_id"].queryset = (
+                Employee.objects.filter(id=reporting_manager.id)
+                if reporting_manager
+                else Employee.objects.none()
+            )
+
+        # # Horilla multi-select filter for subordinates
+        # self.fields["subordinate_id"] = HorillaMultiSelectField(
+        #     queryset=Employee.objects.all(),
+        #     widget=HorillaMultiSelectWidget(
+        #         filter_route_name="employee-widget-filter",
+        #         filter_class=EmployeeFilter,
+        #         filter_instance_contex_name="f",
+        #         filter_template_path="employee_filters.html",
+        #         instance=self.instance,
+        #         required=False,
+        #     ),
+        #     label=_("Subordinates"),
+        # )
 
     def clean(self):
         """
@@ -1123,4 +1153,41 @@ class EmployeeBonusPointForm(HorillaModelForm):
             raise forms.ValidationError(
                 {"bonus_point": _("Point should be greater than zero.")}
             )
+        return cleaned_data
+
+
+class EmployeeFeedbackForm(HorillaModelForm):
+
+    cols = {"others_id": 12}
+
+    class Meta:
+        model = Feedback
+        fields = ["others_id"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["others_id"] = HorillaMultiSelectField(
+            queryset=Employee.objects.filter(employee_work_info__isnull=False),
+            widget=HorillaMultiSelectWidget(
+                filter_route_name="employee-widget-filter",
+                filter_class=EmployeeFilter,
+                filter_instance_contex_name="f",
+                filter_template_path="employee_filters.html",
+                form=self,
+                instance=self.instance,
+            ),
+            label=_("Employees"),
+        )
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if isinstance(self.fields["others_id"], HorillaMultiSelectField):
+            self.errors.pop("others_id", None)
+
+            employee_data = self.fields["others_id"].queryset.filter(
+                id__in=self.data.getlist("others_id")
+            )
+
+            cleaned_data["others_id"] = employee_data
+
         return cleaned_data
